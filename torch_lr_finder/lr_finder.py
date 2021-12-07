@@ -36,9 +36,9 @@ class DataLoaderIter(object):
                 "`inputs_labels_from_batch` method.".format(type(batch_data))
             )
 
-        inputs, labels, *_ = batch_data
+        inputs, labels, u = batch_data
 
-        return inputs, labels
+        return inputs, labels,u
 
     def __iter__(self):
         return self
@@ -56,15 +56,15 @@ class TrainDataLoaderIter(DataLoaderIter):
     def __next__(self):
         try:
             batch = next(self._iterator)
-            inputs, labels = self.inputs_labels_from_batch(batch)
+            inputs, labels,u = self.inputs_labels_from_batch(batch)
         except StopIteration:
             if not self.auto_reset:
                 raise
             self._iterator = iter(self.data_loader)
             batch = next(self._iterator)
-            inputs, labels = self.inputs_labels_from_batch(batch)
+            inputs, labels,u = self.inputs_labels_from_batch(batch)
 
-        return inputs, labels
+        return inputs, labels,u
 
 
 class ValDataLoaderIter(DataLoaderIter):
@@ -147,6 +147,9 @@ class LRFinder(object):
         device=None,
         memory_cache=True,
         cache_dir=None,
+        tft_model=0,
+        u_pd_tbl_train=[],
+        dataset_x=[]
     ):
         # Check if the optimizer is already attached to a scheduler
         self.optimizer = optimizer
@@ -158,6 +161,9 @@ class LRFinder(object):
         self.best_loss = None
         self.memory_cache = memory_cache
         self.cache_dir = cache_dir
+        self.tft_model=tft_model
+        self.u_pd_tbl_train=u_pd_tbl_train
+        self.dataset_x=dataset_x
 
         # Save the original state of the model and optimizer so they can be restored if
         # needed
@@ -368,13 +374,22 @@ class LRFinder(object):
 
         self.optimizer.zero_grad()
         for i in range(accumulation_steps):
-            inputs, labels = next(train_iter)
-            inputs, labels = self._move_to_device(
-                inputs, labels, non_blocking=non_blocking_transfer
-            )
+            if not self.tft_model:
+                inputs, labels,u = next(train_iter)
+                inputs, labels,u = self._move_to_device(
+                    inputs, labels,u, non_blocking=non_blocking_transfer
+                )
+                outputs = self.model(inputs,u)
+            else:
+                u=self.u_pd_tbl_train
+                dataset_x=self.dataset_x
+                inputs,labels=next(train_iter)
+                inputs, labels,u = self._move_to_device(
+                    inputs, labels,u, non_blocking=non_blocking_transfer
+                )
 
-            # Forward pass
-            outputs = self.model(inputs)
+                # Forward pass
+                outputs = self.model(inputs,u,dataset_x)
             loss = self.criterion(outputs, labels)
 
             # Loss should be averaged in each step
@@ -396,13 +411,13 @@ class LRFinder(object):
             if total_loss is None:
                 total_loss = loss
             else:
-                total_loss += loss
+                total_loss += loss                
 
         self.optimizer.step()
 
         return total_loss.item()
 
-    def _move_to_device(self, inputs, labels, non_blocking=True):
+    def _move_to_device(self, inputs, labels,u, non_blocking=True):
         def move(obj, device, non_blocking=True):
             if hasattr(obj, "to"):
                 return obj.to(device, non_blocking=non_blocking)
@@ -417,7 +432,8 @@ class LRFinder(object):
 
         inputs = move(inputs, self.device, non_blocking=non_blocking)
         labels = move(labels, self.device, non_blocking=non_blocking)
-        return inputs, labels
+        u = move(u, self.device, non_blocking=non_blocking)
+        return inputs, labels,u
 
     def _validate(self, val_iter, non_blocking_transfer=True):
         # Set model to evaluation mode and disable gradient computation
